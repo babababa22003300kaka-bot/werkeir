@@ -1,0 +1,11 @@
+{
+  "total_requests": 2,
+  "csrf_refreshes": 1,
+  "batch_fetches": 1,
+  "cache_hits": 2,
+  "errors": 0,
+  "fast_detections": 0,
+  "burst_activations": 0,
+  "adaptive_adjustments": 0,
+  "last_reset": "2025-10-25T23:29:36.624579"
+}
