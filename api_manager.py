@@ -11,16 +11,16 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
 from config import (
-    CSRF_TOKEN_TTL,
+    BURST_MODE_DURATION,
+    CACHE_TTL_MAX,
     CACHE_TTL_MIN,
     CACHE_TTL_NORMAL,
-    CACHE_TTL_MAX,
-    BURST_MODE_DURATION,
+    CSRF_TOKEN_TTL,
     FINAL_STATUSES,
 )
 from stats import stats  # ✅ استيراد من ملف منفصل
@@ -28,7 +28,7 @@ from stats import stats  # ✅ استيراد من ملف منفصل
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════
-# 🧠 Smart Cache Manager
+# 🧠 Smart Cache Manager (النسخة الهجينة النهائية - الأفضل)
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -36,7 +36,8 @@ class SmartCacheManager:
     """
     مدير ذاكرة مؤقتة ذكي مع:
     - Smart TTL متكيف
-    - Burst mode
+    - ✅ Burst Mode جماعي فائق الكفاءة
+    - ✅ Timeout Safety (حماية من التعليق)
     - Fallback mechanism
     """
 
@@ -45,9 +46,9 @@ class SmartCacheManager:
         self.cache_timestamp: Optional[datetime] = None
         self.cache_ttl: float = CACHE_TTL_NORMAL
 
-        # Burst mode tracking
-        self.burst_mode_active: bool = False
-        self.burst_mode_started: Optional[datetime] = None
+        # ✅ نظام Burst Mode المحسّن
+        self.burst_targets: Set[str] = set()  # قائمة IDs الحسابات النشطة
+        self.burst_window_start: Optional[datetime] = None  # بداية النافذة الزمنية
 
         # Activity tracking for Smart TTL
         self.last_changes_count: int = 0
@@ -57,45 +58,60 @@ class SmartCacheManager:
         self.last_successful_cache: Optional[List[Dict]] = None
         self.last_successful_timestamp: Optional[datetime] = None
 
-        # Accounts being monitored during burst
-        self.burst_targets: Set[str] = set()  # account IDs in burst mode
-
     def is_cache_valid(self) -> bool:
-        """تحقق من صلاحية الـ cache"""
+        """✅ التحقق الذكي: طالما فيه أهداف، الكاش غير صالح"""
         if self.cache is None or self.cache_timestamp is None:
             return False
 
-        # في وضع Burst، الـ cache دائماً منتهي (نريد تحديث مستمر)
-        if self.burst_mode_active:
+        # ✅ لو فيه حسابات في قائمة الانتظار، نحدّث باستمرار
+        if self.burst_targets:
             return False
 
         age = (datetime.now() - self.cache_timestamp).total_seconds()
         return age < self.cache_ttl
 
     def activate_burst_mode(self, account_id: str):
-        """تفعيل وضع Burst لحساب معين"""
+        """✅ تفعيل Burst لحساب معين (مع تتبع البداية)"""
         global stats
 
-        if not self.burst_mode_active:
-            self.burst_mode_active = True
-            self.burst_mode_started = datetime.now()
-            stats.burst_activations += 1  # ✅ رجعنا التتبع
-            logger.info(f"🚀 BURST MODE ACTIVATED for account {account_id}")
+        # لو دي أول إضافة، سجّل البداية
+        if not self.burst_targets:
+            self.burst_window_start = datetime.now()
+            stats.burst_activations += 1
+            logger.info(f"🚀 BURST MODE ACTIVATED (first target: {account_id})")
 
         self.burst_targets.add(account_id)
+        logger.info(
+            f"🎯 Added {account_id} to burst targets. Total: {len(self.burst_targets)}"
+        )
+
+    def deactivate_burst_target(self, account_id: str):
+        """✅ إزالة حساب من قائمة الـ Burst (إزالة فردية)"""
+        if account_id in self.burst_targets:
+            self.burst_targets.discard(account_id)
+            logger.info(
+                f"✅ Deactivated burst for {account_id}. Remaining: {len(self.burst_targets)}"
+            )
+
+            # لو القائمة فضت، امسح البداية
+            if not self.burst_targets:
+                self.burst_window_start = None
+                logger.info("⚡ BURST MODE DEACTIVATED (all targets processed)")
 
     def check_burst_mode(self):
-        """تحقق وإلغاء وضع Burst إذا انتهى"""
-        if not self.burst_mode_active:
+        """✅ فحص الـ timeout وإلغاء الـ Burst لو تعدى الوقت المسموح"""
+        if not self.burst_targets or not self.burst_window_start:
             return
 
-        elapsed = (datetime.now() - self.burst_mode_started).total_seconds()
+        elapsed = (datetime.now() - self.burst_window_start).total_seconds()
 
         if elapsed >= BURST_MODE_DURATION:
-            self.burst_mode_active = False
-            self.burst_mode_started = None
+            # ⚠️ Timeout - امسح كل القائمة
+            logger.warning(
+                f"⏱️ BURST MODE TIMEOUT after {elapsed:.1f}s - clearing {len(self.burst_targets)} targets"
+            )
             self.burst_targets.clear()
-            logger.info(f"⚡ BURST MODE DEACTIVATED (lasted {elapsed:.1f}s)")
+            self.burst_window_start = None
 
     def adjust_ttl(self, changes_detected: int):
         """
@@ -127,13 +143,13 @@ class SmartCacheManager:
                 self.cache_ttl = CACHE_TTL_MAX
 
         if old_ttl != self.cache_ttl:
-            stats.adaptive_adjustments += 1  # ✅ رجعنا التتبع
+            stats.adaptive_adjustments += 1
             logger.info(
                 f"🎯 TTL adjusted: {old_ttl:.0f}s → {self.cache_ttl:.0f}s (changes={changes_detected})"
             )
 
     def update_cache(self, new_data: List[Dict], success: bool = True):
-        """تحديث الـ cache"""
+        """تحديث الـ cache مع fallback mechanism"""
         if success:
             self.cache = new_data
             self.cache_timestamp = datetime.now()
