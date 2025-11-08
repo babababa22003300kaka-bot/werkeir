@@ -160,7 +160,9 @@ def get_status_description_ar(status: str) -> str:
 
 
 def parse_sender_data(text: str) -> Dict:
-    """تحليل بيانات السيندر من النص"""
+    """
+    تحليل بيانات السيندر من النص (النسخة النهائية المصححة بناءً على المثال)
+    """
     lines = text.strip().split("\n")
     data = {
         "email": "",
@@ -172,6 +174,13 @@ def parse_sender_data(text: str) -> Dict:
 
     email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 
+    # --- بداية المنطق الجديد فائق الدقة ---
+
+    potential_code_text = ""
+    password_candidate_line = ""
+    password_found = False
+
+    # 1. استخلاص البيانات الأولية (الإيميل، الباسورد، الأوامر)
     for line in lines:
         line = line.strip()
         if not line:
@@ -187,12 +196,29 @@ def parse_sender_data(text: str) -> Dict:
             match = re.search(r"يسيب\s*(\d+)", line)
             if match:
                 data["amount_keep"] = match.group(1)
-        elif re.match(r"^[\d.]+$", line):
-            clean_code = line.split(".")[-1] if "." in line else line
-            data["codes"].append(clean_code)
-        elif data["email"] and not data["password"]:
+        elif data["email"] and not data["password"] and not password_found:
+            # هذا هو السطر الأول بعد الإيميل، نعتبره الباسورد
             data["password"] = line
+            password_found = True
+        else:
+            # أي سطر آخر نجمعه للبحث عن الأكواد
+            potential_code_text += line + " "
 
+    # 2. استخلاص الأكواد من النص المجمع
+    #    النمط r'\d{8,}' يبحث عن أي تسلسل من 8 أرقام أو أكثر
+    found_codes = re.findall(r"\d{8,}", potential_code_text)
+
+    cleaned_codes = []
+    if found_codes:
+        for code in found_codes:
+            # نأخذ آخر 8 أرقام فقط من كل تسلسل رقمي نجده
+            cleaned_codes.append(code[-8:])
+
+    data["codes"] = cleaned_codes
+
+    # --- نهاية المنطق الجديد ---
+
+    # 3. تجميع الأكواد النهائية في شكل نص مفصول بفاصلة
     data["codes"] = ",".join(data["codes"])
     return data
 
