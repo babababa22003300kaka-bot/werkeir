@@ -365,11 +365,11 @@ async def wait_for_status_change(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            # تحقق من حالة Burst Mode
-            smart_cache.check_burst_mode()
-
+            # ✅ تحديث مؤشر الـ Burst ليعرض العدد الفعلي للحسابات النشطة
             mode_indicator = (
-                "🚀 BURST" if smart_cache.burst_mode_active else "🔄 NORMAL"
+                f"🚀 BURST ({len(smart_cache.burst_targets)})"
+                if smart_cache.burst_targets
+                else "🔄 NORMAL"
             )
 
             # 🎯 البحث بالـ ID (أكثر أماناً)
@@ -458,14 +458,13 @@ async def wait_for_status_change(
                         )
                         added_to_monitor = True
 
-                # إلغاء Burst Mode
-                smart_cache.burst_mode_active = False
-                smart_cache.burst_targets.discard(account_id)
+                # ✅ الحل الصحيح: إزالة الحساب الحالي فقط من قائمة الأهداف
+                smart_cache.deactivate_burst_target(account_id)
 
                 return True, account_info
 
-            # فاصل زمني
-            if smart_cache.burst_mode_active:
+            # ✅ فاصل زمني ذكي يعتمد على قائمة الأهداف
+            if smart_cache.burst_targets:
                 interval = BURST_MODE_INTERVAL
             else:
                 interval = 4.0 if is_transitional else 5.0
@@ -481,10 +480,9 @@ async def wait_for_status_change(
     # انتهت المحاولات
     logger.warning(f"⏱️ {email}: Timeout, final status: {last_status}")
 
-    # إلغاء Burst Mode
-    smart_cache.burst_mode_active = False
+    # ✅ الحل الصحيح: إزالة الحساب الحالي فقط من قائمة الأهداف
     if account_id:
-        smart_cache.burst_targets.discard(account_id)
+        smart_cache.deactivate_burst_target(account_id)
 
     # 🆕 شرط الإضافة المحدّث
     if account_info:
