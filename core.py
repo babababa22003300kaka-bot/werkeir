@@ -14,7 +14,7 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from api_manager import smart_cache
 from config import (
@@ -161,66 +161,174 @@ def get_status_description_ar(status: str) -> str:
 
 def parse_sender_data(text: str) -> Dict:
     """
-    تحليل بيانات السيندر من النص (النسخة النهائية المصححة بناءً على المثال)
+    تحليل بيانات السيندر من النص (نسخة مصححة 100%)
+
+    ✅ يدعم:
+    - اسحب / اسحبي / يسحب / اسحبو / اسحبوا
+    - يسيب / سيب / سيبي / سيبو / اسيب / سيبوا
+    - مع أو بدون مسافات
+    - أرقام عربية وإنجليزية
+    - الباسورد لو فيه أرقام مش هياخده كـ Code
+    - إزالة الأكواد المكررة
     """
     lines = text.strip().split("\n")
     data = {
         "email": "",
         "password": "",
-        "codes": [],
+        "codes": "",
         "amount_take": "",
         "amount_keep": "",
     }
 
-    email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+    # ✅ محسّن: يدعم أرقام عربية في الإيميل (نادر بس ممكن)
+    email_pattern = r"[a-zA-Z0-9٠-٩._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 
-    # --- بداية المنطق الجديد فائق الدقة ---
+    # 🧠 الكلمات الذكية للسحب والإبقاء
+    TAKE_KEYWORDS = [
+        "اسحب",
+        "اسحبي",
+        "اسحبو",
+        "اسحبوا",
+        "يسحب",
+        "يسحبوا",
+        "خذ",
+        "خدي",
+        "خدو",
+        "take",
+    ]
+
+    KEEP_KEYWORDS = [
+        "يسيب",
+        "سيب",
+        "سيبي",
+        "سيبو",
+        "سيبوا",
+        "اسيب",
+        "اسيبي",
+        "اسيبو",
+        "خلي",
+        "خليي",
+        "خليو",
+        "ابقي",
+        "ابقى",
+        "keep",
+    ]
 
     potential_code_text = ""
-    password_candidate_line = ""
     password_found = False
+    lines_to_skip = set()
 
-    # 1. استخلاص البيانات الأولية (الإيميل، الباسورد، الأوامر)
-    for line in lines:
+    # ════════════════════════════════════════════════════════
+    # 1️⃣ المرحلة الأولى: نجيب الإيميل والباسورد
+    # ════════════════════════════════════════════════════════
+    for idx, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
 
+        # ✅ البحث عن الإيميل
         if re.match(email_pattern, line):
             data["email"] = line.lower()
-        elif "اسحب" in line:
-            match = re.search(r"اسحب\s*(\d+)", line)
-            if match:
-                data["amount_take"] = match.group(1)
-        elif "يسيب" in line:
-            match = re.search(r"يسيب\s*(\d+)", line)
-            if match:
-                data["amount_keep"] = match.group(1)
-        elif data["email"] and not data["password"] and not password_found:
-            # هذا هو السطر الأول بعد الإيميل، نعتبره الباسورد
+            lines_to_skip.add(idx)
+            continue
+
+        # ✅ استخلاص الباسورد (أول سطر بعد الإيميل)
+        if data["email"] and not password_found:
             data["password"] = line
             password_found = True
-        else:
-            # أي سطر آخر نجمعه للبحث عن الأكواد
-            potential_code_text += line + " "
+            lines_to_skip.add(idx)
+            continue
 
-    # 2. استخلاص الأكواد من النص المجمع
-    #    النمط r'\d{8,}' يبحث عن أي تسلسل من 8 أرقام أو أكثر
+    # ════════════════════════════════════════════════════════
+    # 2️⃣ المرحلة الثانية: نجيب الأوامر والأكواد من باقي السطور
+    # ════════════════════════════════════════════════════════
+    for idx, line in enumerate(lines):
+        line = line.strip()
+        if not line or idx in lines_to_skip:
+            continue
+
+        # 🧠 البحث الذكي عن أمر السحب
+        if not data["amount_take"]:
+            take_found = extract_amount_smart(line, TAKE_KEYWORDS)
+            if take_found:
+                data["amount_take"] = take_found
+
+        # 🧠 البحث الذكي عن أمر الإبقاء
+        if not data["amount_keep"]:
+            keep_found = extract_amount_smart(line, KEEP_KEYWORDS)
+            if keep_found:
+                data["amount_keep"] = keep_found
+
+        # ✅ جمع باقي النص للبحث عن الأكواد
+        line_for_codes = remove_commands(line, TAKE_KEYWORDS + KEEP_KEYWORDS)
+        if line_for_codes:
+            potential_code_text += line_for_codes + " "
+
+    # ════════════════════════════════════════════════════════
+    # 3️⃣ المرحلة الثالثة: استخلاص الأكواد النهائية
+    # ════════════════════════════════════════════════════════
     found_codes = re.findall(r"\d{8,}", potential_code_text)
+    cleaned_codes = [code[-8:] for code in found_codes]
+    # ✅ محسّن: شيل الأكواد المكررة مع الحفاظ على الترتيب
+    unique_codes = list(dict.fromkeys(cleaned_codes))
+    data["codes"] = ",".join(unique_codes)
 
-    cleaned_codes = []
-    if found_codes:
-        for code in found_codes:
-            # نأخذ آخر 8 أرقام فقط من كل تسلسل رقمي نجده
-            cleaned_codes.append(code[-8:])
-
-    data["codes"] = cleaned_codes
-
-    # --- نهاية المنطق الجديد ---
-
-    # 3. تجميع الأكواد النهائية في شكل نص مفصول بفاصلة
-    data["codes"] = ",".join(data["codes"])
     return data
+
+
+def extract_amount_smart(line: str, keywords: List[str]) -> str:
+    """
+    🧠 استخلاص ذكي للمبلغ من السطر
+    """
+    # تحويل الأرقام العربية
+    line_normalized = convert_arabic_numbers(line.lower())
+
+    # البحث عن الكلمة المفتاحية + الرقم
+    for keyword in keywords:
+        pattern = rf"{keyword}\s*(\d+)"
+        match = re.search(pattern, line_normalized)
+        if match:
+            return match.group(1)
+
+    return ""
+
+
+def remove_commands(line: str, keywords: List[str]) -> str:
+    """
+    🧹 إزالة الأوامر من السطر قبل البحث عن الأكواد
+    """
+    # ✅ مصحح: نحول الأرقام العربية أولاً
+    line_cleaned = convert_arabic_numbers(line)
+
+    for keyword in keywords:
+        pattern = rf"{keyword}\s*\d+"
+        line_cleaned = re.sub(pattern, "", line_cleaned, flags=re.IGNORECASE)
+
+    return line_cleaned.strip()
+
+
+def convert_arabic_numbers(text: str) -> str:
+    """
+    تحويل الأرقام العربية (٠-٩) إلى إنجليزية (0-9)
+    """
+    arabic_to_english = {
+        "٠": "0",
+        "١": "1",
+        "٢": "2",
+        "٣": "3",
+        "٤": "4",
+        "٥": "5",
+        "٦": "6",
+        "٧": "7",
+        "٨": "8",
+        "٩": "9",
+    }
+
+    processed_text = text
+    for ar, en in arabic_to_english.items():
+        processed_text = processed_text.replace(ar, en)
+
+    return processed_text
 
 
 # ═══════════════════════════════════════════════════════════════
