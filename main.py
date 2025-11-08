@@ -53,6 +53,14 @@ logger = logging.getLogger(__name__)
 with open("config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
+# ═══════════════════════════════════════════════════════════════
+# 🎯 Global Constants
+# ═══════════════════════════════════════════════════════════════
+
+# 🎯 تحديد حد أقصى 10 خيوط مؤقتة في نفس الوقت
+MAX_CONCURRENT_MONITORS = 10
+monitoring_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MONITORS)
+
 # Global vars
 telegram_app = None
 api_manager = None
@@ -104,6 +112,67 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
 
+async def monitor_account_task(api_manager, email, msg, chat_id, group_name):
+    """
+    🚀 Task منفصل لمراقبة الحساب (يدعم 10 متزامنين)
+    """
+    # 🔥 انتظار مكان شاغر (الحد الأقصى 10)
+    async with monitoring_semaphore:
+        try:
+            # 🆕 مراقبة الحساب
+            monitoring_success, account_info = await wait_for_status_change(
+                api_manager,
+                email,
+                msg,
+                chat_id,
+                group_name,
+            )
+
+            if account_info:
+                status = account_info.get("Status", "غير محدد")
+                status_ar = get_status_description_ar(status)
+                account_id = account_info.get("idAccount", "N/A")
+
+                result_text = (
+                    f"✅ *تمت الإضافة بنجاح!*\n\n"
+                    f"📧 `{email}`\n"
+                    f"🆔 ID: `{account_id}`\n"
+                    f"📊 *تمت الإضافة لـ Google Sheets*\n\n"
+                    f"📊 *الحالة النهائية:*\n"
+                    f"   `{status}`\n"
+                    f"   {get_status_emoji(status)} {status_ar}\n\n"
+                )
+
+                # 🆕 عرض حالة الإضافة للمراقبة
+                if status.upper() == "AVAILABLE":
+                    group_name_acc = account_info.get("Group", "")
+                    if group_name_acc == group_name:
+                        result_text += f"🔄 *تم إدراجه في المراقبة (المصدر: البوت)*\n"
+                    else:
+                        result_text += f"ℹ️ *لم يتم إدراجه في المراقبة (الجروب مختلف: {group_name_acc})*\n"
+                elif status.upper() in ["WRONG DETAILS", "BACKUP CODE WRONG"]:
+                    result_text += f"⚠️ *تحتاج مراجعة!*\n"
+
+                available = format_number(account_info.get("Available", "0"))
+                taken = format_number(account_info.get("Taken", "0"))
+
+                if available != "0" or taken != "0":
+                    result_text += f"\n💵 المتاح: {available}\n✅ المسحوب: {taken}"
+
+                await msg.edit_text(result_text, parse_mode="Markdown")
+            else:
+                await msg.edit_text(
+                    f"⚠️ *تمت الإضافة لكن لم يتم العثور على الحساب*\n"
+                    f"📧 `{email}`\n"
+                    f"💡 جرب `/search {email}` بعد قليل",
+                    parse_mode="Markdown",
+                )
+
+        except Exception as e:
+            logger.exception(f"❌ Monitoring error: {email}")
+            await msg.edit_text(f"❌ خطأ في المراقبة: {str(e)}")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالجة إضافة حساب جديد"""
     admin_ids = CONFIG["telegram"].get("admin_ids", [])
@@ -147,56 +216,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
 
-            # 🆕 مراقبة الحساب (الإضافة لـ pending.json ستحدث تلقائياً داخل wait_for_status_change)
-            monitoring_success, account_info = await wait_for_status_change(
-                api_manager,
-                data["email"],
-                msg,
-                update.effective_chat.id,
-                CONFIG["website"]["defaults"]["group_name"],
+            # ✅ الحل: اعمل Task منفصل بدون انتظار
+            asyncio.create_task(
+                monitor_account_task(
+                    api_manager,
+                    data["email"],
+                    msg,
+                    update.effective_chat.id,
+                    CONFIG["website"]["defaults"]["group_name"],
+                )
             )
-
-            if account_info:
-                status = account_info.get("Status", "غير محدد")
-                status_ar = get_status_description_ar(status)
-                account_id = account_info.get("idAccount", "N/A")
-
-                result_text = (
-                    f"✅ *تمت الإضافة بنجاح!*\n\n"
-                    f"📧 `{data['email']}`\n"
-                    f"🆔 ID: `{account_id}`\n"
-                    f"📊 *تمت الإضافة لـ Google Sheets*\n\n"
-                    f"📊 *الحالة النهائية:*\n"
-                    f"   `{status}`\n"
-                    f"   {get_status_emoji(status)} {status_ar}\n\n"
-                )
-
-                # 🆕 عرض حالة الإضافة للمراقبة
-                if status.upper() == "AVAILABLE":
-                    group_name = account_info.get("Group", "")
-                    default_group = CONFIG["website"]["defaults"]["group_name"]
-
-                    if group_name == default_group:
-                        result_text += f"🔄 *تم إدراجه في المراقبة (المصدر: البوت)*\n"
-                    else:
-                        result_text += f"ℹ️ *لم يتم إدراجه في المراقبة (الجروب مختلف: {group_name})*\n"
-                elif status.upper() in ["WRONG DETAILS", "BACKUP CODE WRONG"]:
-                    result_text += f"⚠️ *تحتاج مراجعة!*\n"
-
-                available = format_number(account_info.get("Available", "0"))
-                taken = format_number(account_info.get("Taken", "0"))
-
-                if available != "0" or taken != "0":
-                    result_text += f"\n💵 المتاح: {available}\n✅ المسحوب: {taken}"
-
-                await msg.edit_text(result_text, parse_mode="Markdown")
-            else:
-                await msg.edit_text(
-                    f"⚠️ *تمت الإضافة لكن لم يتم العثور على الحساب*\n"
-                    f"📧 `{data['email']}`\n"
-                    f"💡 جرب `/search {data['email']}` بعد قليل",
-                    parse_mode="Markdown",
-                )
 
         else:
             await msg.edit_text(
